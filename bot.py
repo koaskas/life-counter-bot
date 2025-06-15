@@ -25,40 +25,37 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     chat_id = update.effective_chat.id
 
-    # Если переданы аргументы — устанавливаем или обновляем дату рождения
     if args:
         text = ' '.join(args)
         try:
             birth_dt = datetime.strptime(text, "%Y-%m-%d %H:%M").replace(tzinfo=MSK)
         except ValueError:
             await update.message.reply_text(
-                "Неправильный формат. Используй: /start YYYY-MM-DD HH:MM (МСК)"
+                "❌ Неправильный формат. Используй: /start YYYY-MM-DD HH:MM (МСК)"
             )
             return
 
-        # Сохраняем дату рождения и планируем ежедневное уведомление
+        # Сохраняем дату рождения, обновляем задачу
         context.user_data['birth_dt'] = birth_dt
         job_name = f"daily_{chat_id}"
-        # Удаляем старые задачи с тем же именем
         for job in context.job_queue.get_jobs_by_name(job_name):
             job.schedule_removal()
-        # Планируем задачу на 10:00 МСК каждый день
         context.job_queue.run_daily(
             daily_job,
             time=dt_time(10, 0, tzinfo=MSK),
             data={'chat_id': chat_id, 'birth_dt': birth_dt},
             name=job_name,
         )
-        # Немедленная отправка текущей статистики
+        # Отправка подтверждения и мгновенной статистики
         days, weeks, months, years = calc_life_stats(birth_dt, datetime.now(tz=MSK))
         await update.message.reply_text(
-            f"Дата рождения установлена: {birth_dt.strftime('%Y-%m-%d %H:%M')} МСК.\n"
+            f"✅ Дата рождения установлена: {birth_dt.strftime('%Y-%m-%d %H:%M')} МСК.\n"
             f"Сейчас: {days}-й день ({weeks}-я неделя, {months}-й месяц, {years}-й год).\n"
-            f"Буду писать ежедневно в 10:00 МСК."
+            "Буду писать ежедневно в 10:00 МСК."
         )
         return
 
-    # Если аргументы не переданы, но дата рождения ещё не установлена
+    # Без аргументов
     if 'birth_dt' not in context.user_data:
         await update.message.reply_text(
             "Привет! Чтобы начать, укажи дату рождения командой:\n"
@@ -66,11 +63,25 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Дата рождения уже есть — выводим обновлённую статистику
+    # Если дата уже установлена — выводим статистику
+    await send_stats(update, context)
+
+# ── Обработчик команды /info ──────────────────────────────────────────────────
+async def cmd_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if 'birth_dt' not in context.user_data:
+        await update.message.reply_text(
+            "Сначала укажи дату рождения: /start YYYY-MM-DD HH:MM (МСК)"
+        )
+        return
+    await send_stats(update, context)
+
+# ── Вспомогательная функция отправки статистики ────────────────────────────────
+async def send_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     birth_dt = context.user_data['birth_dt']
-    days, weeks, months, years = calc_life_stats(birth_dt, datetime.now(tz=MSK))
+    now = datetime.now(tz=MSK)
+    days, weeks, months, years = calc_life_stats(birth_dt, now)
     await update.message.reply_text(
-        f"Текущая статистика:\n"
+        f"📊 Текущая статистика:\n"
         f"{days}-й день жизни ({weeks}-я неделя, {months}-й месяц, {years}-й год)."
     )
 
@@ -83,8 +94,8 @@ async def daily_job(context: ContextTypes.DEFAULT_TYPE):
     days, weeks, months, years = calc_life_stats(birth_dt, now)
 
     msg = (
-        "Ещё один день жизни!\n"
-        f"{days}-й день ({weeks}-я неделя, {months}-й месяц, {years}-й год)."
+        "⏰ Ещё один день!\n"
+        f"{days}-й день жизни ({weeks}-я неделя, {months}-й месяц, {years}-й год)."
     )
     await context.bot.send_message(chat_id, msg)
 
@@ -92,4 +103,5 @@ async def daily_job(context: ContextTypes.DEFAULT_TYPE):
 if __name__ == "__main__":
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("info", cmd_info))
     app.run_polling()
