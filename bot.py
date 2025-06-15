@@ -3,70 +3,107 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
-from telegram.ext import Application, CommandHandler, ContextTypes
-
-# ── базовая инициализация ────────────────────────────────────────────────────
-load_dotenv()                          # читает переменные из .env
-TOKEN = os.getenv("BOT_TOKEN")
-BIRTH_RAW = os.getenv("BIRTH_DATETIME", "2000-01-01 00:00")
-BIRTH_DT = datetime.strptime(BIRTH_RAW, "%Y-%m-%d %H:%M").replace(
-    tzinfo=timezone(timedelta(hours=3))  # МСК
+from telegram import Update
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    ContextTypes,
 )
 
+# ── Инициализация и логирование ─────────────────────────────────────────────
+load_dotenv()
+TOKEN = os.getenv("BOT_TOKEN")
 logging.basicConfig(level=logging.INFO)
 
-# ── вспомогательная функция ──────────────────────────────────────────────────
-def calc_life_stats(now: datetime):
-    delta = now - BIRTH_DT
+# ── Функция расчёта статистики ───────────────────────────────────────────────
+def calc_life_stats(birth_dt: datetime, now: datetime):
+    delta = now - birth_dt
     days = delta.days
     weeks = days // 7
-    months = int(days / 30.4375)        # среднее кол-во дней в месяце
+    months = int(days / 30.4375)
     years = int(days / 365.2425)
     return days, weeks, months, years
 
-# ── обработчики команд ───────────────────────────────────────────────────────
-async def cmd_start(update, context):
-    days, weeks, months, years = calc_life_stats(
-        datetime.now(tz=timezone.utc).astimezone(BIRTH_DT.tzinfo)
-    )
+# ── Обработчики команд ───────────────────────────────────────────────────────
+async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Приветствие и совет установить дату рождения
+    if 'birth_dt' not in context.user_data:
+        await update.message.reply_text(
+            "Привет! Пожалуйста, задайте дату рождения командой:
+"            "/setbirth YYYY-MM-DD HH:MM"
+            )
+        return
+
+    birth_dt: datetime = context.user_data['birth_dt']
+    now = datetime.now(tz=birth_dt.tzinfo)
+    days, weeks, months, years = calc_life_stats(birth_dt, now)
+
     msg = (
-        f"Привет!\n"
-        f"Сегодня {days}-й день, {weeks}-я неделя,\n"
-        f"{months}-й месяц и {years}-й год твоей жизни."
+        f"Привет!
+"
+        f"Сегодня {days}-й день жизни ({weeks}-я неделя, {months}-й месяц, {years}-й год)."
     )
     await update.message.reply_text(msg)
 
-async def daily_job(context: ContextTypes.DEFAULT_TYPE):
-    chat_id = context.job.data
-    days, weeks, months, years = calc_life_stats(
-        datetime.now(tz=timezone.utc).astimezone(BIRTH_DT.tzinfo)
-    )
-    txt = (
-        f"Ещё один день прожит!\n"
-        f"{days}-й день ({weeks}-я неделя, "
-        f"{months}-й месяц, {years}-й год) твоей жизни."
-    )
-    await context.bot.send_message(chat_id, txt)
 
-# ── запуск приложения ────────────────────────────────────────────────────────
+async def set_birth(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Установка даты рождения пользователем
+    args = context.args
+    if not args:
+        await update.message.reply_text(
+            "Использование: /setbirth YYYY-MM-DD HH:MM"
+        )
+        return
+
+    text = ' '.join(args)
+    try:
+        birth_dt = datetime.strptime(text, "%Y-%m-%d %H:%M").replace(
+            tzinfo=timezone(timedelta(hours=3))  # МСК
+        )
+    except ValueError:
+        await update.message.reply_text(
+            "Неправильный формат даты. Пример: /setbirth 1990-01-15 08:30"
+        )
+        return
+
+    # Сохраняем в user_data и планируем ежедневные уведомления
+    context.user_data['birth_dt'] = birth_dt
+    chat_id = update.effective_chat.id
+    context.job_queue.run_daily(
+        daily_job,
+        time=birth_dt.timetz().replace(hour=10, minute=0),
+        data={'chat_id': chat_id, 'birth_dt': birth_dt},
+        name=f"daily_{chat_id}",
+    )
+
+    await update.message.reply_text(
+        f"Дата рождения установлена: {birth_dt.strftime('%Y-%m-%d %H:%M')} МСК."
+        "\nУведомления будут приходить каждый день в 10:00 МСК."
+    )
+
+
+async def daily_job(context: ContextTypes.DEFAULT_TYPE):
+    # Ежедневное сообщение
+    job_data = context.job.data
+    chat_id = job_data['chat_id']
+    birth_dt: datetime = job_data['birth_dt']
+    now = datetime.now(tz=birth_dt.tzinfo)
+    days, weeks, months, years = calc_life_stats(birth_dt, now)
+
+    msg = (
+        f"Ещё один день прожит!\n"
+        f"{days}-й день жизни ({weeks}-я неделя, {months}-й месяц, {years}-й год)."
+    )
+    await context.bot.send_message(chat_id, msg)
+
+
+# ── Запуск приложения ────────────────────────────────────────────────────────
 if __name__ == "__main__":
     app = Application.builder().token(TOKEN).build()
 
-    # команда /start
+    # Обработчики
     app.add_handler(CommandHandler("start", cmd_start))
+    app.add_handler(CommandHandler("setbirth", set_birth))
 
-    # ежедневная задача в 10:00 МСК; чат_id берём при первой /start
-    # (по уму надо хранить chat_id в БД, но для начала так)
-    async def set_alarm(update, context):
-        chat_id = update.effective_chat.id
-        context.job_queue.run_daily(
-            daily_job,
-            time=datetime.time(10, 0, tzinfo=BIRTH_DT.tzinfo),
-            data=chat_id,
-            name=str(chat_id),
-        )
-        await update.message.reply_text("Окей! Буду писать каждый день в 10:00.")
-
-    app.add_handler(CommandHandler("alarm", set_alarm))
-
+    # Запуск polling
     app.run_polling()
