@@ -4,11 +4,16 @@ services:
   bot:
     container_name: life-counter-bot
     build: .
-    restart: unless-stopped          # перезапуск при падении
+    restart: unless-stopped # перезапуск при падении
     env_file:
-      - .env                         # токен и дата рождения (НЕ в репо)
+      - .env # токен и дата рождения (НЕ в репо)
     environment:
-      TZ: Europe/Moscow              # часовой пояс в контейнере
+      TZ: Europe/Moscow # часовой пояс в контейнере
     volumes:
-      - ./bot.py:/app/bot.py         # горячая правка кода (опц.)
+      - ./bot.py:/app/bot.py # горячая правка кода (опц.)
     # networks / logging ⇢ можно добавить позже
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
