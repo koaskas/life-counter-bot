@@ -11,6 +11,11 @@ logging.basicConfig(level=logging.INFO)
 # Московское время (UTC+3)
 MSK = timezone(timedelta(hours=3))
 
+# ── Время ежедневного уведомления из env ─────────────────────────────────────
+raw_notify = os.getenv("NOTIFY_TIME", "10:00")
+hour, minute = map(int, raw_notify.split(':'))
+notify_time = dt_time(hour, minute, tzinfo=MSK)
+
 # ── Функция расчёта статистики ───────────────────────────────────────────────
 def calc_life_stats(birth_dt: datetime, now: datetime):
     delta = now - birth_dt
@@ -25,7 +30,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     chat_id = update.effective_chat.id
 
-    # Если указаны аргументы, пробуем установить дату
+    # Если указаны аргументы, пробуем установить дату рождения и задачи
     if args:
         text = ' '.join(args)
         try:
@@ -38,28 +43,26 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Сохраняем дату рождения
         context.user_data['birth_dt'] = birth_dt
-        # Пытаемся запланировать уведомление
+        # Планируем ежедневное уведомление
         job_name = f"daily_{chat_id}"
         try:
-            # удаляем старые задачи
             for job in context.job_queue.get_jobs_by_name(job_name):
                 job.schedule_removal()
-            # добавляем новую задачу на 10:00 МСК
             context.job_queue.run_daily(
                 daily_job,
-                time=dt_time(10, 0, tzinfo=MSK),
+                time=notify_time,
                 data={'chat_id': chat_id, 'birth_dt': birth_dt},
                 name=job_name,
             )
         except Exception as e:
             logging.warning(f"Не удалось запланировать JobQueue: {e}")
 
-        # Отправка подтверждения и мгновенной статистики
+        # Мгновенная статистика
         days, weeks, months, years = calc_life_stats(birth_dt, datetime.now(tz=MSK))
         await update.message.reply_text(
             f"✅ Дата рождения установлена: {birth_dt.strftime('%Y-%m-%d %H:%M')} МСК.\n"
             f"Сейчас: {days}-й день ({weeks}-я неделя, {months}-й месяц, {years}-й год).\n"
-            "Используй /info для актуальной статистики или дождись 10:00 МСК."
+            f"Уведомления в {raw_notify} МСК ежедневно. Используй /info для статистики."
         )
         return
 
@@ -71,7 +74,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Если дата уже установлена — выдаём статустику
+    # Если дата уже установлена — выдаём статистику
     await send_stats(update, context)
 
 # ── Обработчик команды /info ──────────────────────────────────────────────────
@@ -102,7 +105,7 @@ async def daily_job(context: ContextTypes.DEFAULT_TYPE):
     days, weeks, months, years = calc_life_stats(birth_dt, now)
 
     msg = (
-        "⏰ Ещё один день жизни!\n"
+        f"⏰ Ещё один день жизни!\n"
         f"{days}-й день ({weeks}-я неделя, {months}-й месяц, {years}-й год)."
     )
     await context.bot.send_message(chat_id, msg)
