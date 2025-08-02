@@ -2,3 +2,8 @@
 Сразу тянет код и перезапускает контейнер
 
 Тестовые доп данные
+
+.env
+BOT_TOKEN=...
+BOT_KEY=your_secret_key
+NOTIFY_TIME=10:00

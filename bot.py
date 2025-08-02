@@ -1,22 +1,38 @@
 import os
+import sys
 import logging
 from datetime import datetime, timedelta, timezone, time as dt_time
 
+from dotenv import load_dotenv
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-# ── Инициализация и логирование ─────────────────────────────────────────────
+# ── Загрузка .env и инициализация ─────────────────────────────────────────────
+load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
+SECRET_KEY = os.getenv("BOT_KEY")
+raw_notify = os.getenv("NOTIFY_TIME")
+
+# Проверяем обязательные переменные
+if not TOKEN or not SECRET_KEY or not raw_notify:
+    logging.error("Missing BOT_TOKEN, BOT_KEY or NOTIFY_TIME in environment.")
+    sys.exit(1)
+
+# Логирование
 logging.basicConfig(level=logging.INFO)
+
 # Московское время (UTC+3)
 MSK = timezone(timedelta(hours=3))
 
-# ── Время ежедневного уведомления из env ─────────────────────────────────────
-raw_notify = os.getenv("NOTIFY_TIME", "10:00")
-hour, minute = map(int, raw_notify.split(':'))
-notify_time = dt_time(hour, minute, tzinfo=MSK)
+# Парсим время уведомлений из env
+try:
+    hour, minute = map(int, raw_notify.split(':'))
+    notify_time = dt_time(hour, minute, tzinfo=MSK)
+except Exception as e:
+    logging.error(f"Invalid NOTIFY_TIME format: {e}")
+    sys.exit(1)
 
-# ── Функция расчёта статистики ───────────────────────────────────────────────
+# ── Статистика жизни ───────────────────────────────────────────────────────────
 def calc_life_stats(birth_dt: datetime, now: datetime):
     delta = now - birth_dt
     days = delta.days
@@ -25,74 +41,78 @@ def calc_life_stats(birth_dt: datetime, now: datetime):
     years = int(days / 365.2425)
     return days, weeks, months, years
 
-# ── Обработчик команды /start ─────────────────────────────────────────────────
+# ── Парсинг даты рождения ───────────────────────────────────────────────────────
+def parse_birth(args):
+    raw = ' '.join(args).replace("(МСК)", "").strip()
+    return datetime.strptime(raw, "%Y-%m-%d %H:%M").replace(tzinfo=MSK)
+
+# ── Команда /start ─────────────────────────────────────────────────────────────
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     chat_id = update.effective_chat.id
 
-    # Функция для парсинга даты с поддержкой опционального "(МСК)"
-    def parse_input(arg_list):
-        raw = ' '.join(arg_list)
-        # Убираем вхождения "(МСК)" или похожие
-        raw = raw.replace("(МСК)", "").strip()
-        return raw
-
-    if args:
-        text = parse_input(args)
-        try:
-            birth_dt = datetime.strptime(text, "%Y-%m-%d %H:%M").replace(tzinfo=MSK)
-        except ValueError:
-            await update.message.reply_text(
-                "❌ Неправильный формат. Используй: /start YYYY-MM-DD HH:MM (МСК) или /start YYYY-MM-DD HH:MM"
-            )
-            return
-
-        # Сохраняем дату рождения
-        context.user_data['birth_dt'] = birth_dt
-        # Планируем ежедневное уведомление
-        job_name = f"daily_{chat_id}"
-        try:
-            for job in context.job_queue.get_jobs_by_name(job_name):
-                job.schedule_removal()
-            context.job_queue.run_daily(
-                daily_job,
-                time=notify_time,
-                data={'chat_id': chat_id, 'birth_dt': birth_dt},
-                name=job_name,
-            )
-        except Exception as e:
-            logging.warning(f"Не удалось запланировать JobQueue: {e}")
-
-        # Мгновенная статистика
-        days, weeks, months, years = calc_life_stats(birth_dt, datetime.now(tz=MSK))
+    # Проверка ключа и даты
+    if len(args) < 3:
         await update.message.reply_text(
-            f"✅ Дата рождения установлена: {birth_dt.strftime('%Y-%m-%d %H:%M')} МСК.\n"
-            f"Сейчас: {days}-й день ({weeks}-я неделя, {months}-й месяц, {years}-й год).\n"
-            f"Уведомления в {raw_notify} МСК ежедневно. Используй /info для статистики."
+            "❌ Использование: /start <KEY> YYYY-MM-DD HH:MM (МСК)"
+        )
+        return
+    key, *date_args = args
+    if key != SECRET_KEY:
+        await update.message.reply_text(
+            "❌ Неверный ключ доступа."
+        )
+        return
+    try:
+        birth_dt = parse_birth(date_args)
+    except ValueError:
+        await update.message.reply_text(
+            "❌ Неправильный формат даты. Используй: /start <KEY> YYYY-MM-DD HH:MM"
         )
         return
 
-    # Без аргументов и без установленной даты
-    if 'birth_dt' not in context.user_data:
-        await update.message.reply_text(
-            "Привет! Чтобы начать, укажи дату рождения командой:\n"
-            "/start YYYY-MM-DD HH:MM (МСК)"
-        )
-        return
+    # Сохраняем дату и планируем уведомления
+    context.user_data['birth_dt'] = birth_dt
+    job_name = f"daily_{chat_id}"
+    # удаляем старые
+    for job in context.job_queue.get_jobs_by_name(job_name):
+        job.schedule_removal()
+    # планируем новые
+    context.job_queue.run_daily(
+        daily_job,
+        time=notify_time,
+        data={'chat_id': chat_id, 'birth_dt': birth_dt},
+        name=job_name,
+    )
 
-    # Если дата уже установлена — выдаём статистику
-    await send_stats(update, context)
+    # Мгновенная статистика
+    days, weeks, months, years = calc_life_stats(birth_dt, datetime.now(tz=MSK))
+    await update.message.reply_text(
+        f"✅ Дата рождения установлена: {birth_dt.strftime('%Y-%m-%d %H:%M')} МСК.\n"
+        f"Сейчас: {days}-й день ({weeks}-я неделя, {months}-й месяц, {years}-й год).\n"
+        f"Уведомления каждый день в {raw_notify} МСК."
+    )
 
-# ── Обработчик команды /info ──────────────────────────────────────────────────
+# ── Команда /info ──────────────────────────────────────────────────────────────
 async def cmd_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if 'birth_dt' not in context.user_data:
         await update.message.reply_text(
-            "Сначала укажи дату рождения: /start YYYY-MM-DD HH:MM (МСК)"
+            "❌ Сначала укажи дату рождения: /start <KEY> YYYY-MM-DD HH:MM (МСК)"
         )
         return
     await send_stats(update, context)
 
-# ── Вспомогательная функция отправки статистики ────────────────────────────────
+# ── Команда /help ──────────────────────────────────────────────────────────────
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    help_text = (
+        "📋 Доступные команды:\n"
+        "/start <KEY> YYYY-MM-DD HH:MM (МСК) — задать дату рождения\n"
+        "/info — получить текущую статистику\n"
+        "/help — показать это сообщение"
+    )
+    await update.message.reply_text(help_text)
+
+# ── Вспомогательная отправка статистики ───────────────────────────────────────
 async def send_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     birth_dt = context.user_data['birth_dt']
     now = datetime.now(tz=MSK)
@@ -102,7 +122,7 @@ async def send_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{days}-й день жизни ({weeks}-я неделя, {months}-й месяц, {years}-й год)."
     )
 
-# ── Функция ежедневного уведомления ────────────────────────────────────────────
+# ── Ежедневное уведомление ────────────────────────────────────────────────────
 async def daily_job(context: ContextTypes.DEFAULT_TYPE):
     data = context.job.data
     chat_id = data['chat_id']
@@ -118,7 +138,8 @@ async def daily_job(context: ContextTypes.DEFAULT_TYPE):
 
 # ── Точка входа ───────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    app = Application.builder().token(TOKEN).build()
+    app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("info", cmd_info))
+    app.add_handler(CommandHandler("help", cmd_help))
     app.run_polling()
