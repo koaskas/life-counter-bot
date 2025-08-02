@@ -30,14 +30,20 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     chat_id = update.effective_chat.id
 
-    # Если указаны аргументы, пробуем установить дату рождения и задачи
+    # Функция для парсинга даты с поддержкой опционального "(МСК)"
+    def parse_input(arg_list):
+        raw = ' '.join(arg_list)
+        # Убираем вхождения "(МСК)" или похожие
+        raw = raw.replace("(МСК)", "").strip()
+        return raw
+
     if args:
-        text = ' '.join(args)
+        text = parse_input(args)
         try:
             birth_dt = datetime.strptime(text, "%Y-%m-%d %H:%M").replace(tzinfo=MSK)
         except ValueError:
             await update.message.reply_text(
-                "❌ Неправильный формат. Используй: /start YYYY-MM-DD HH:MM (МСК)"
+                "❌ Неправильный формат. Используй: /start YYYY-MM-DD HH:MM (МСК) или /start YYYY-MM-DD HH:MM"
             )
             return
 
@@ -66,7 +72,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Если без аргументов и дата не установлена
+    # Без аргументов и без установленной даты
     if 'birth_dt' not in context.user_data:
         await update.message.reply_text(
             "Привет! Чтобы начать, укажи дату рождения командой:\n"
