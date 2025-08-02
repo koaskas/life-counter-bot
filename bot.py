@@ -7,24 +7,21 @@ from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-# ── Загрузка .env и инициализация ─────────────────────────────────────────────
+# ── Загрузка .env и проверка переменных ───────────────────────────────────────
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
 SECRET_KEY = os.getenv("BOT_KEY")
 raw_notify = os.getenv("NOTIFY_TIME")
 
-# Проверяем обязательные переменные
 if not TOKEN or not SECRET_KEY or not raw_notify:
     logging.error("Missing BOT_TOKEN, BOT_KEY or NOTIFY_TIME in environment.")
     sys.exit(1)
 
-# Логирование
+# ── Логирование и часовой пояс ────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO)
-
-# Московское время (UTC+3)
 MSK = timezone(timedelta(hours=3))
 
-# Парсим время уведомлений из env
+# ── Парсинг времени уведомлений ───────────────────────────────────────────────
 try:
     hour, minute = map(int, raw_notify.split(':'))
     notify_time = dt_time(hour, minute, tzinfo=MSK)
@@ -51,18 +48,17 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     chat_id = update.effective_chat.id
 
-    # Проверка ключа и даты
     if len(args) < 3:
         await update.message.reply_text(
             "❌ Использование: /start <KEY> YYYY-MM-DD HH:MM (МСК)"
         )
         return
+
     key, *date_args = args
     if key != SECRET_KEY:
-        await update.message.reply_text(
-            "❌ Неверный ключ доступа."
-        )
+        await update.message.reply_text("❌ Неверный ключ доступа.")
         return
+
     try:
         birth_dt = parse_birth(date_args)
     except ValueError:
@@ -71,13 +67,10 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Сохраняем дату и планируем уведомления
     context.user_data['birth_dt'] = birth_dt
     job_name = f"daily_{chat_id}"
-    # удаляем старые
     for job in context.job_queue.get_jobs_by_name(job_name):
         job.schedule_removal()
-    # планируем новые
     context.job_queue.run_daily(
         daily_job,
         time=notify_time,
@@ -85,7 +78,6 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         name=job_name,
     )
 
-    # Мгновенная статистика
     days, weeks, months, years = calc_life_stats(birth_dt, datetime.now(tz=MSK))
     await update.message.reply_text(
         f"✅ Дата рождения установлена: {birth_dt.strftime('%Y-%m-%d %H:%M')} МСК.\n"
@@ -108,9 +100,25 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📋 Доступные команды:\n"
         "/start <KEY> YYYY-MM-DD HH:MM (МСК) — задать дату рождения\n"
         "/info — получить текущую статистику\n"
+        "/test — получить тестовое уведомление немедленно\n"
         "/help — показать это сообщение"
     )
     await update.message.reply_text(help_text)
+
+# ── Команда /test ──────────────────────────────────────────────────────────────
+async def cmd_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if 'birth_dt' not in context.user_data:
+        await update.message.reply_text(
+            "❌ Сначала укажи дату рождения: /start <KEY> YYYY-MM-DD HH:MM (МСК)"
+        )
+        return
+    birth_dt = context.user_data['birth_dt']
+    days, weeks, months, years = calc_life_stats(birth_dt, datetime.now(tz=MSK))
+    msg = (
+        "🛠 Тестовое уведомление!\n"
+        f"{days}-й день жизни ({weeks}-я неделя, {months}-й месяц, {years}-й год)."
+    )
+    await update.message.reply_text(msg)
 
 # ── Вспомогательная отправка статистики ───────────────────────────────────────
 async def send_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -129,7 +137,6 @@ async def daily_job(context: ContextTypes.DEFAULT_TYPE):
     birth_dt: datetime = data['birth_dt']
     now = datetime.now(tz=MSK)
     days, weeks, months, years = calc_life_stats(birth_dt, now)
-
     msg = (
         f"⏰ Ещё один день жизни!\n"
         f"{days}-й день ({weeks}-я неделя, {months}-й месяц, {years}-й год)."
@@ -142,4 +149,5 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("info", cmd_info))
     app.add_handler(CommandHandler("help", cmd_help))
+    app.add_handler(CommandHandler("test", cmd_test))
     app.run_polling()
