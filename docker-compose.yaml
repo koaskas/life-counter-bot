@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   bot:
     container_name: life-counter-bot
