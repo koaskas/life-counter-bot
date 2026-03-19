@@ -2,16 +2,18 @@ import os
 import sys
 import logging
 from datetime import datetime, timedelta, timezone, time as dt_time
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, Defaults
 
 # ── Загрузка .env и проверка переменных ───────────────────────────────────────
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
 SECRET_KEY = os.getenv("BOT_KEY")
 raw_notify = os.getenv("NOTIFY_TIME")
+notify_display = raw_notify
 
 if not TOKEN or not SECRET_KEY or not raw_notify:
     logging.error("Missing BOT_TOKEN, BOT_KEY or NOTIFY_TIME in environment.")
@@ -19,15 +21,27 @@ if not TOKEN or not SECRET_KEY or not raw_notify:
 
 # ── Логирование и часовой пояс ────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO)
-MSK = timezone(timedelta(hours=3))
+MSK = ZoneInfo("Europe/Moscow")
 
 # ── Парсинг времени уведомлений ───────────────────────────────────────────────
 try:
-    hour, minute = map(int, raw_notify.split(':'))
+    # Бывает, что значение в .env приходит в кавычках: NOTIFY_TIME="09:00"
+    # dotenv обычно убирает кавычки, но сделаем парсинг устойчивым.
+    cleaned = raw_notify.strip().strip('"').strip("'")
+    notify_display = cleaned
+    hour, minute = map(int, cleaned.split(':'))
     notify_time = dt_time(hour, minute, tzinfo=MSK)
 except Exception as e:
     logging.error(f"Invalid NOTIFY_TIME format: {e}")
     sys.exit(1)
+
+logging.info(
+    "Daily notification configured: raw=%r parsed=%02d:%02d tz=%s",
+    raw_notify,
+    hour,
+    minute,
+    getattr(MSK, "key", str(MSK)),
+)
 
 # ── Статистика жизни ───────────────────────────────────────────────────────────
 def calc_life_stats(birth_dt: datetime, now: datetime):
@@ -71,18 +85,19 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     job_name = f"daily_{chat_id}"
     for job in context.job_queue.get_jobs_by_name(job_name):
         job.schedule_removal()
-    context.job_queue.run_daily(
+    job = context.job_queue.run_daily(
         daily_job,
         time=notify_time,
         data={'chat_id': chat_id, 'birth_dt': birth_dt},
         name=job_name,
     )
+    logging.info("Daily job scheduled: chat_id=%s next_run=%s", chat_id, getattr(job, "next_t", None))
 
     days, weeks, months, years = calc_life_stats(birth_dt, datetime.now(tz=MSK))
     await update.message.reply_text(
         f"✅ Дата рождения установлена: {birth_dt.strftime('%Y-%m-%d %H:%M')} МСК.\n"
         f"Сейчас: {days}-й день ({weeks}-я неделя, {months}-й месяц, {years}-й год).\n"
-        f"Уведомления каждый день в {raw_notify} МСК."
+        f"Уведомления каждый день в {notify_display} МСК."
     )
 
 # ── Команда /info ──────────────────────────────────────────────────────────────
@@ -136,6 +151,7 @@ async def daily_job(context: ContextTypes.DEFAULT_TYPE):
     chat_id = data['chat_id']
     birth_dt: datetime = data['birth_dt']
     now = datetime.now(tz=MSK)
+    logging.info("Daily job triggered: chat_id=%s now=%s", chat_id, now.isoformat())
     days, weeks, months, years = calc_life_stats(birth_dt, now)
     msg = (
         f"⏰ Ещё один день жизни!\n"
@@ -145,7 +161,8 @@ async def daily_job(context: ContextTypes.DEFAULT_TYPE):
 
 # ── Точка входа ───────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    app = ApplicationBuilder().token(TOKEN).build()
+    defaults = Defaults(tzinfo=MSK)
+    app = ApplicationBuilder().token(TOKEN).defaults(defaults).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("info", cmd_info))
     app.add_handler(CommandHandler("help", cmd_help))
