@@ -1,27 +1,77 @@
 import os
 import sys
 import logging
-from datetime import datetime, timedelta, timezone, time as dt_time
+from datetime import datetime, time as dt_time
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, Defaults
+from telegram.ext import Application, ApplicationBuilder, CommandHandler, ContextTypes, Defaults
 
-# ── Загрузка .env и проверка переменных ───────────────────────────────────────
+# ── Загрузка .env (BOT_TOKEN, NOTIFY_TIME, ALLOWED_USER_IDS, USER_BIRTH_DATES) ─
 load_dotenv()
 TOKEN = os.getenv("BOT_TOKEN")
-SECRET_KEY = os.getenv("BOT_KEY")
 raw_notify = os.getenv("NOTIFY_TIME")
 notify_display = raw_notify
+raw_allowed = os.getenv("ALLOWED_USER_IDS", "").strip()
+raw_births = os.getenv("USER_BIRTH_DATES", "").strip()
 
-if not TOKEN or not SECRET_KEY or not raw_notify:
-    logging.error("Missing BOT_TOKEN, BOT_KEY or NOTIFY_TIME in environment.")
+if not TOKEN or not raw_notify or not raw_allowed or not raw_births:
+    logging.error(
+        "Missing BOT_TOKEN, NOTIFY_TIME, ALLOWED_USER_IDS or USER_BIRTH_DATES in environment."
+    )
+    sys.exit(1)
+
+try:
+    ALLOWED_USER_IDS = frozenset(
+        int(x.strip())
+        for x in raw_allowed.replace(" ", "").split(",")
+        if x.strip()
+    )
+except ValueError as e:
+    logging.error("Invalid ALLOWED_USER_IDS (comma-separated integers): %s", e)
+    sys.exit(1)
+
+if not ALLOWED_USER_IDS:
+    logging.error("ALLOWED_USER_IDS is empty.")
     sys.exit(1)
 
 # ── Логирование и часовой пояс ────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO)
 MSK = ZoneInfo("Europe/Moscow")
+
+
+def _parse_user_birth_map(raw: str) -> dict[int, datetime]:
+    """Формат: «id:YYYY-MM-DD HH:MM|id2:...» — разделитель записей |."""
+    out: dict[int, datetime] = {}
+    for entry in raw.split("|"):
+        entry = entry.strip()
+        if not entry:
+            continue
+        if ":" not in entry:
+            raise ValueError(f"Ожидалось id:дата, получено: {entry!r}")
+        uid_str, rest = entry.split(":", 1)
+        uid = int(uid_str.strip())
+        dt = datetime.strptime(rest.strip(), "%Y-%m-%d %H:%M").replace(tzinfo=MSK)
+        out[uid] = dt
+    return out
+
+
+try:
+    BIRTH_BY_USER = _parse_user_birth_map(raw_births)
+except ValueError as e:
+    logging.error("Invalid USER_BIRTH_DATES: %s", e)
+    sys.exit(1)
+
+_ids_birth = frozenset(BIRTH_BY_USER.keys())
+if _ids_birth != ALLOWED_USER_IDS:
+    logging.error(
+        "ALLOWED_USER_IDS и USER_BIRTH_DATES должны содержать одни и те же id. "
+        "allowed=%s birth=%s",
+        sorted(ALLOWED_USER_IDS),
+        sorted(_ids_birth),
+    )
+    sys.exit(1)
 
 # ── Парсинг времени уведомлений ───────────────────────────────────────────────
 try:
@@ -43,6 +93,21 @@ logging.info(
     getattr(MSK, "key", str(MSK)),
 )
 
+
+def user_allowed(update: Update) -> bool:
+    u = update.effective_user
+    return u is not None and u.id in ALLOWED_USER_IDS
+
+
+async def deny_if_not_allowed(update: Update) -> bool:
+    """Возвращает True, если нужно прервать обработчик (пользователь не в белом списке)."""
+    if user_allowed(update):
+        return False
+    if update.message:
+        await update.message.reply_text("❌ Доступ запрещён.")
+    logging.warning("Denied access: user_id=%s", getattr(update.effective_user, "id", None))
+    return True
+
 # ── Статистика жизни ───────────────────────────────────────────────────────────
 def calc_life_stats(birth_dt: datetime, now: datetime):
     delta = now - birth_dt
@@ -52,82 +117,51 @@ def calc_life_stats(birth_dt: datetime, now: datetime):
     years = int(days / 365.2425)
     return days, weeks, months, years
 
-# ── Парсинг даты рождения ───────────────────────────────────────────────────────
-def parse_birth(args):
-    raw = ' '.join(args).replace("(МСК)", "").strip()
-    return datetime.strptime(raw, "%Y-%m-%d %H:%M").replace(tzinfo=MSK)
-
 # ── Команда /start ─────────────────────────────────────────────────────────────
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    args = context.args
-    chat_id = update.effective_chat.id
-
-    if len(args) < 3:
-        await update.message.reply_text(
-            "❌ Использование: /start <KEY> YYYY-MM-DD HH:MM (МСК)"
-        )
+    if await deny_if_not_allowed(update):
         return
 
-    key, *date_args = args
-    if key != SECRET_KEY:
-        await update.message.reply_text("❌ Неверный ключ доступа.")
+    uid = update.effective_user.id
+    birth_dt = BIRTH_BY_USER.get(uid)
+    if not birth_dt:
         return
-
-    try:
-        birth_dt = parse_birth(date_args)
-    except ValueError:
-        await update.message.reply_text(
-            "❌ Неправильный формат даты. Используй: /start <KEY> YYYY-MM-DD HH:MM"
-        )
-        return
-
-    context.user_data['birth_dt'] = birth_dt
-    job_name = f"daily_{chat_id}"
-    for job in context.job_queue.get_jobs_by_name(job_name):
-        job.schedule_removal()
-    job = context.job_queue.run_daily(
-        daily_job,
-        time=notify_time,
-        data={'chat_id': chat_id, 'birth_dt': birth_dt},
-        name=job_name,
-    )
-    logging.info("Daily job scheduled: chat_id=%s next_run=%s", chat_id, getattr(job, "next_t", None))
 
     days, weeks, months, years = calc_life_stats(birth_dt, datetime.now(tz=MSK))
     await update.message.reply_text(
-        f"✅ Дата рождения установлена: {birth_dt.strftime('%Y-%m-%d %H:%M')} МСК.\n"
+        f"✅ Бот активен. Дата рождения из конфига: {birth_dt.strftime('%Y-%m-%d %H:%M')} МСК.\n"
         f"Сейчас: {days}-й день ({weeks}-я неделя, {months}-й месяц, {years}-й год).\n"
         f"Уведомления каждый день в {notify_display} МСК."
     )
 
 # ── Команда /info ──────────────────────────────────────────────────────────────
 async def cmd_info(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if 'birth_dt' not in context.user_data:
-        await update.message.reply_text(
-            "❌ Сначала укажи дату рождения: /start <KEY> YYYY-MM-DD HH:MM (МСК)"
-        )
+    if await deny_if_not_allowed(update):
+        return
+    if update.effective_user.id not in BIRTH_BY_USER:
         return
     await send_stats(update, context)
 
 # ── Команда /help ──────────────────────────────────────────────────────────────
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if await deny_if_not_allowed(update):
+        return
     help_text = (
         "📋 Доступные команды:\n"
-        "/start <KEY> YYYY-MM-DD HH:MM (МСК) — задать дату рождения\n"
-        "/info — получить текущую статистику\n"
-        "/test — получить тестовое уведомление немедленно\n"
-        "/help — показать это сообщение"
+        "/start — приветствие и сводка (дата рождения задаётся в конфиге)\n"
+        "/info — текущая статистика\n"
+        "/test — тестовое уведомление\n"
+        "/help — это сообщение"
     )
     await update.message.reply_text(help_text)
 
 # ── Команда /test ──────────────────────────────────────────────────────────────
 async def cmd_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if 'birth_dt' not in context.user_data:
-        await update.message.reply_text(
-            "❌ Сначала укажи дату рождения: /start <KEY> YYYY-MM-DD HH:MM (МСК)"
-        )
+    if await deny_if_not_allowed(update):
         return
-    birth_dt = context.user_data['birth_dt']
+    birth_dt = BIRTH_BY_USER.get(update.effective_user.id)
+    if not birth_dt:
+        return
     days, weeks, months, years = calc_life_stats(birth_dt, datetime.now(tz=MSK))
     msg = (
         "🛠 Тестовое уведомление!\n"
@@ -137,7 +171,7 @@ async def cmd_test(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ── Вспомогательная отправка статистики ───────────────────────────────────────
 async def send_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    birth_dt = context.user_data['birth_dt']
+    birth_dt = BIRTH_BY_USER[update.effective_user.id]
     now = datetime.now(tz=MSK)
     days, weeks, months, years = calc_life_stats(birth_dt, now)
     await update.message.reply_text(
@@ -159,10 +193,38 @@ async def daily_job(context: ContextTypes.DEFAULT_TYPE):
     )
     await context.bot.send_message(chat_id, msg)
 
+async def post_init(application: Application) -> None:
+    jq = application.job_queue
+    if jq is None:
+        logging.error("Job queue is not available.")
+        return
+    for uid, birth_dt in BIRTH_BY_USER.items():
+        job_name = f"daily_{uid}"
+        for job in jq.get_jobs_by_name(job_name):
+            job.schedule_removal()
+        job = jq.run_daily(
+            daily_job,
+            time=notify_time,
+            data={"chat_id": uid, "birth_dt": birth_dt},
+            name=job_name,
+        )
+        logging.info(
+            "Daily job scheduled: user_id=%s next_run=%s",
+            uid,
+            getattr(job, "next_t", None),
+        )
+
+
 # ── Точка входа ───────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     defaults = Defaults(tzinfo=MSK)
-    app = ApplicationBuilder().token(TOKEN).defaults(defaults).build()
+    app = (
+        ApplicationBuilder()
+        .token(TOKEN)
+        .defaults(defaults)
+        .post_init(post_init)
+        .build()
+    )
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("info", cmd_info))
     app.add_handler(CommandHandler("help", cmd_help))

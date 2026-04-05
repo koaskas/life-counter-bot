@@ -3,10 +3,10 @@
 
 Тестовые доп данные
 
-.env
-BOT_TOKEN=...
-BOT_KEY=your_secret_key
-NOTIFY_TIME=10:00
+Доступ к боту только у перечисленных в .env в ALLOWED_USER_IDS (через запятую).
+
+В .env: BOT_TOKEN, NOTIFY_TIME, ALLOWED_USER_IDS, USER_BIRTH_DATES (дата для каждого id из списка, формат см. .env.sample); опционально BOT_KEY.
+Файл .env в git не коммитится.
 
 
 Есть идея 
